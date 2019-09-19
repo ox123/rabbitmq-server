@@ -33,8 +33,6 @@
 -export([log_locations/0, config_files/0, decrypt_config/2]). %% for testing and mgmt-agent
 -export([is_booted/1, is_booted/0, is_booting/1, is_booting/0]).
 
--deprecated([{force_event_refresh, 1, eventually}]).
-
 -ifdef(TEST).
 
 -export([start_logger/0]).
@@ -227,6 +225,12 @@
 -rabbit_boot_step({pre_flight,
                    [{description, "ready to communicate with peers and clients"},
                     {requires,    [core_initialized, recovery, routing_ready]}]}).
+
+-rabbit_boot_step({cluster_name,
+                   [{description, "sets cluster name if configured"},
+                    {mfa,         {rabbit_nodes, boot, []}},
+                    {requires,    pre_flight}
+                    ]}).
 
 -rabbit_boot_step({direct_client,
                    [{description, "direct client"},
@@ -539,6 +543,12 @@ start_loaded_apps(Apps, RestartTypes) ->
     application:set_env(ra, logger_module, rabbit_log_ra_shim),
     %% use a larger segments size for queues
     application:set_env(ra, segment_max_entries, 32768),
+    case application:get_env(ra, wal_max_size_bytes) of
+        undefined ->
+            application:set_env(ra, wal_max_size_bytes, 536870912); %% 5 * 2 ^ 20
+        _ ->
+            ok
+    end,
     ConfigEntryDecoder = case application:get_env(rabbit, config_entry_decoder) of
         undefined ->
             [];
@@ -884,7 +894,7 @@ total_queue_count() ->
     lists:foldl(fun (VirtualHost, Acc) ->
                   Acc + rabbit_amqqueue:count(VirtualHost)
                 end,
-                0, rabbit_vhost:list()).
+                0, rabbit_vhost:list_names()).
 
 %% TODO this only determines if the rabbit application has started,
 %% not if it is running, never mind plugins. It would be nice to have
@@ -1030,8 +1040,10 @@ boot_error(_, {error, {cannot_log_to_file, LogFile, Reason}}) ->
                             [LogFile, Reason]);
 boot_error(_, {error, {generate_config_file, Error}}) ->
     log_boot_error_and_exit(generate_config_file,
-                            "~nConfig file generation failed:~n~s~n",
-                            [Error]);
+      "~nConfig file generation failed:~n~s"
+      "In case the setting comes from a plugin, make sure that the plugin is enabled.~n"
+      "Alternatively remove the setting from the config.~n",
+      [Error]);
 boot_error(Class, Reason) ->
     LogLocations = log_locations(),
     log_boot_error_and_exit(
@@ -1088,7 +1100,7 @@ insert_default_data() ->
     DefaultWritePermBin = rabbit_data_coercion:to_binary(DefaultWritePerm),
     DefaultReadPermBin = rabbit_data_coercion:to_binary(DefaultReadPerm),
 
-    ok = rabbit_vhost:add(DefaultVHostBin, ?INTERNAL_USER),
+    ok = rabbit_vhost:add(DefaultVHostBin, <<"Default virtual host">>, [], ?INTERNAL_USER),
     ok = lager_exchange_backend:maybe_init_exchange(),
     ok = rabbit_auth_backend_internal:add_user(
         DefaultUserBin,
@@ -1117,17 +1129,16 @@ start_logger() ->
 log_locations() ->
     rabbit_lager:log_locations().
 
-%% This feature was used by the management API up-to and including
-%% RabbitMQ 3.7.x. It is unused in 3.8.x and thus deprecated. We keep it
-%% to support in-place upgrades to 3.8.x (i.e. mixed-version clusters).
-
 -spec force_event_refresh(reference()) -> 'ok'.
 
+% Note: https://www.pivotaltracker.com/story/show/166962656
+% This event is necessary for the stats timer to be initialized with
+% the correct values once the management agent has started
 force_event_refresh(Ref) ->
-    rabbit_direct:force_event_refresh(Ref),
-    rabbit_networking:force_connection_event_refresh(Ref),
-    rabbit_channel:force_event_refresh(Ref),
-    rabbit_amqqueue:force_event_refresh(Ref).
+    ok = rabbit_direct:force_event_refresh(Ref),
+    ok = rabbit_networking:force_connection_event_refresh(Ref),
+    ok = rabbit_channel:force_event_refresh(Ref),
+    ok = rabbit_amqqueue:force_event_refresh(Ref).
 
 %%---------------------------------------------------------------------------
 %% misc
@@ -1166,7 +1177,7 @@ print_banner() ->
     {ok, Version} = application:get_key(vsn),
     {LogFmt, LogLocations} = case log_locations() of
         [_ | Tail] = LL ->
-            LF = lists:flatten(["~n                    ~s"
+            LF = lists:flatten(["~n                    ~ts"
                                 || _ <- lists:seq(1, length(Tail))]),
             {LF, LL};
         [] ->
@@ -1176,7 +1187,7 @@ print_banner() ->
               "~n  ##  ##      ~s ~s. ~s"
               "~n  ##########  ~s"
               "~n  ######  ##"
-              "~n  ##########  Logs: ~s" ++
+              "~n  ##########  Logs: ~ts" ++
               LogFmt ++
               "~n~n              Starting broker..."
               "~n",
@@ -1200,7 +1211,7 @@ log_banner() ->
     DescrLen = 1 + lists:max([length(K) || {K, _V} <- Settings]),
     Format = fun (K, V) ->
                      rabbit_misc:format(
-                       " ~-" ++ integer_to_list(DescrLen) ++ "s: ~s~n", [K, V])
+                       " ~-" ++ integer_to_list(DescrLen) ++ "s: ~ts~n", [K, V])
              end,
     Banner = string:strip(lists:flatten(
                [case S of
@@ -1211,7 +1222,7 @@ log_banner() ->
                     {K, V} ->
                         Format(K, V)
                 end || S <- Settings]), right, $\n),
-    rabbit_log:info("~n~s", [Banner]).
+    rabbit_log:info("~n~ts", [Banner]).
 
 warn_if_kernel_config_dubious() ->
     case os:type() of

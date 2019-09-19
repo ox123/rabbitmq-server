@@ -17,6 +17,7 @@
 -module(channel_source_SUITE).
 
 -include_lib("amqp_client/include/amqp_client.hrl").
+-include_lib("eunit/include/eunit.hrl").
 
 -compile(export_all).
 
@@ -85,7 +86,7 @@ network_rabbit_reader_channel_source1(Config) ->
     [{source, ?MODULE}] = rabbit_channel:info(ServerCh, [source]),
     amqp_channel:close(ClientCh),
     amqp_connection:close(Conn),
-    {error, channel_terminated} = rabbit_channel:source(ServerCh, ?MODULE),
+    wait_for_channel_termination(ServerCh, 60),
     passed.
 
 network_arbitrary_channel_source(Config) ->
@@ -102,13 +103,10 @@ network_arbitrary_channel_source1(Config) ->
                  rabbit_ct_broker_helpers:user(<<"guest">>), <<"/">>, [],
                  Collector, Limiter),
     _ = rabbit_channel:source(Ch, ?MODULE),
-    [{amqp_params, #amqp_params_network{username = <<"guest">>,
-        password = <<"guest">>, host = "localhost", virtual_host = <<"/">>}}] =
-            rabbit_amqp_connection:amqp_params(Conn, 1000),
     [{source, ?MODULE}] = rabbit_channel:info(Ch, [source]),
     [exit(P, normal) || P <- [Writer, Limiter, Collector, Ch]],
     amqp_connection:close(Conn),
-    {error, channel_terminated} = rabbit_channel:source(Ch, ?MODULE),
+    wait_for_channel_termination(Ch, 60),
     passed.
 
 direct_channel_source(Config) ->
@@ -125,8 +123,21 @@ direct_channel_source1(Config) ->
     [{source, ?MODULE}] = rabbit_channel:info(ServerCh, [source]),
     amqp_channel:close(ClientCh),
     amqp_connection:close(Conn),
-    {error, channel_terminated} = rabbit_channel:source(ServerCh, ?MODULE),
+    wait_for_channel_termination(ServerCh, 60),
     passed.
+
+wait_for_channel_termination(Ch, 0) ->
+    ?assertEqual(
+       {error, channel_terminated},
+       rabbit_channel:source(Ch, ?MODULE));
+wait_for_channel_termination(Ch, Attempts) ->
+    case rabbit_channel:source(Ch, ?MODULE) of
+        {error, channel_terminated} ->
+            ok;
+        _ ->
+            timer:sleep(1000),
+            wait_for_channel_termination(Ch, Attempts - 1)
+    end.
 
 undefined_channel_source(Config) ->
     passed = rabbit_ct_broker_helpers:rpc(Config, 0,
@@ -135,8 +146,19 @@ undefined_channel_source(Config) ->
 undefined_channel_source1(_Config) ->
     ExistingChannels = rabbit_channel:list(),
     {_Writer, _Limiter, ServerCh} = rabbit_ct_broker_helpers:test_channel(),
-    [ServerCh] = rabbit_channel:list() -- ExistingChannels,
+    wait_for_server_channel(ExistingChannels, ServerCh, 60),
     [{source, undefined}] = rabbit_channel:info(ServerCh, [source]),
     _ = rabbit_channel:source(ServerCh, ?MODULE),
     [{source, ?MODULE}] = rabbit_channel:info(ServerCh, [source]),
     passed.
+
+wait_for_server_channel(ExistingChannels, ServerCh, 0) ->
+    ?assertEqual([ServerCh], rabbit_channel:list() -- ExistingChannels);
+wait_for_server_channel(ExistingChannels, ServerCh, Attempts) ->
+    case rabbit_channel:list() -- ExistingChannels of
+        [ServerCh] ->
+            ok;
+        _ ->
+            timer:sleep(1000),
+            wait_for_server_channel(ExistingChannels, ServerCh, Attempts - 1)
+    end.

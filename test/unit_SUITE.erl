@@ -32,7 +32,9 @@ all() ->
 groups() ->
     [
       {parallel_tests, [parallel], [
-          auth_backend_internal_expand_topic_permission,
+          {access_control, [parallel], [
+            auth_backend_internal_expand_topic_permission
+          ]},
           {basic_header_handling, [parallel], [
               write_table_with_invalid_existing_type,
               invalid_existing_headers,
@@ -880,8 +882,13 @@ listing_plugins_from_multiple_directories(Config) ->
                    {FirstDir, plugin_both, "1"},
                    {SecondDir, plugin_both, "2"}]),
 
-    %% Everything was collected from both directories, plugin with higher version should take precedence
-    Path = FirstDir ++ ":" ++ SecondDir,
+    %% Everything was collected from both directories, plugin with higher
+    %% version should take precedence
+    PathSep = case os:type() of
+                  {win32, _} -> ";";
+                  _          -> ":"
+              end,
+    Path = FirstDir ++ PathSep ++ SecondDir,
     Got = lists:sort([{Name, Vsn} || #plugin{name = Name, version = Vsn} <- rabbit_plugins:list(Path)]),
     Expected = [{plugin_both, "2"}, {plugin_first_dir, "3"}, {plugin_second_dir, "4"}],
     case Got of
@@ -892,6 +899,10 @@ listing_plugins_from_multiple_directories(Config) ->
             exit({wrong_plugins_list, Got})
     end,
     ok.
+
+%%
+%% Access Control
+%%
 
 auth_backend_internal_expand_topic_permission(_Config) ->
     ExpandMap = #{<<"username">> => <<"guest">>, <<"vhost">> => <<"default">>},

@@ -60,7 +60,7 @@
      }}).
 
 suite() ->
-    [{timetrap, 10 * 60000}].
+    [{timetrap, {minutes, 15}}].
 
 all() ->
     [
@@ -204,6 +204,7 @@ init_per_testcase(Testcase, Config) ->
                             declare_arbitrary_feature_flag(Config3),
                             Config3;
                         false ->
+                            end_per_testcase(Testcase, Config3),
                             {skip, "Feature flags subsystem unavailable"}
                     end
             end;
@@ -239,6 +240,7 @@ init_per_testcase(Testcase, Config) ->
                             declare_arbitrary_feature_flag(Config3),
                             Config3;
                         false ->
+                            end_per_testcase(Testcase, Config3),
                             {skip, "Feature flags subsystem unavailable"}
                     end
             end
@@ -527,7 +529,7 @@ enable_feature_flag_with_a_network_partition(Config) ->
 
     %% Repair the network and try again to enable the feature flag.
     unblock(NodePairs),
-    timer:sleep(1000),
+    timer:sleep(10000),
     [?assertEqual(ok, rabbit_ct_broker_helpers:stop_node(Config, N))
      || N <- [A, C, D]],
     [?assertEqual(ok, rabbit_ct_broker_helpers:start_node(Config, N))
@@ -879,7 +881,11 @@ build_my_plugin(Config) ->
     PluginSrcDir = filename:join(?config(data_dir, Config), "my_plugin"),
     PluginsDir1 = filename:join(?config(current_srcdir, Config), "plugins"),
     PluginsDir2 = filename:join(PluginSrcDir, "plugins"),
-    PluginsDir = PluginsDir1 ++ ":" ++ PluginsDir2,
+    PathSep = case os:type() of
+                  {win32, _} -> ";";
+                  _          -> ":"
+              end,
+    PluginsDir = PluginsDir1 ++ PathSep ++ PluginsDir2,
     Config1 = rabbit_ct_helpers:set_config(Config,
                                            [{rmq_plugins_dir, PluginsDir}]),
     case filelib:wildcard("plugins/my_plugin-*", PluginSrcDir) of

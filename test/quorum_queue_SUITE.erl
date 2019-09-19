@@ -71,7 +71,8 @@ groups() ->
                                             metrics_cleanup_on_leadership_takeover,
                                             metrics_cleanup_on_leader_crash,
                                             consume_in_minority,
-                                            shrink_all
+                                            shrink_all,
+                                            rebalance
                                             ]},
                       {cluster_size_5, [], [start_queue,
                                             start_queue_concurrent,
@@ -264,15 +265,15 @@ declare_args(Config) ->
     declare(Ch, LQ, [{<<"x-queue-type">>, longstr, <<"quorum">>},
                      {<<"x-max-length">>, long, 2000},
                      {<<"x-max-length-bytes">>, long, 2000}]),
-    assert_queue_type(Server, LQ, quorum),
+    assert_queue_type(Server, LQ, rabbit_quorum_queue),
 
     DQ = <<"classic-declare-args-q">>,
     declare(Ch, DQ, [{<<"x-queue-type">>, longstr, <<"classic">>}]),
-    assert_queue_type(Server, DQ, classic),
+    assert_queue_type(Server, DQ, rabbit_classic_queue),
 
     DQ2 = <<"classic-q2">>,
     declare(Ch, DQ2),
-    assert_queue_type(Server, DQ2, classic).
+    assert_queue_type(Server, DQ2, rabbit_classic_queue).
 
 declare_invalid_properties(Config) ->
     Server = rabbit_ct_broker_helpers:get_node_config(Config, 0, nodename),
@@ -667,7 +668,50 @@ shrink_all(Config) ->
                   {_, {error, 1, last_node}}], Result2),
     ok.
 
+rebalance(Config) ->
+    [Server0, _, _] =
+        rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
 
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server0),
+
+    Q1 = <<"q1">>,
+    Q2 = <<"q2">>,
+    Q3 = <<"q3">>,
+    Q4 = <<"q4">>,
+    Q5 = <<"q5">>,
+
+    ?assertEqual({'queue.declare_ok', Q1, 0, 0},
+                 declare(Ch, Q1, [{<<"x-queue-type">>, longstr, <<"quorum">>}])),
+    ?assertEqual({'queue.declare_ok', Q2, 0, 0},
+                 declare(Ch, Q2, [{<<"x-queue-type">>, longstr, <<"quorum">>}])),
+    timer:sleep(1000),
+
+    {ok, _, {_, Leader1}} = ra:members({ra_name(Q1), Server0}),
+    {ok, _, {_, Leader2}} = ra:members({ra_name(Q2), Server0}),
+    rabbit_ct_client_helpers:publish(Ch, Q1, 3),
+    rabbit_ct_client_helpers:publish(Ch, Q2, 2),
+
+    ?assertEqual({'queue.declare_ok', Q3, 0, 0},
+                 declare(Ch, Q3, [{<<"x-queue-type">>, longstr, <<"quorum">>}])),
+    ?assertEqual({'queue.declare_ok', Q4, 0, 0},
+                 declare(Ch, Q4, [{<<"x-queue-type">>, longstr, <<"quorum">>}])),
+    ?assertEqual({'queue.declare_ok', Q5, 0, 0},
+                 declare(Ch, Q5, [{<<"x-queue-type">>, longstr, <<"quorum">>}])),
+    timer:sleep(500),
+    {ok, Summary} = rpc:call(Server0, rabbit_amqqueue, rebalance, [quorum, ".*", ".*"]),
+
+    %% Q1 and Q2 should not have moved leader, as these are the queues with more
+    %% log entries and we allow up to two queues per node (3 nodes, 5 queues)
+    ?assertMatch({ok, _, {_, Leader1}}, ra:members({ra_name(Q1), Server0})),
+    ?assertMatch({ok, _, {_, Leader2}}, ra:members({ra_name(Q2), Server0})),
+
+    %% Check that we have at most 2 queues per node
+    ?assert(lists:all(fun(NodeData) ->
+                              lists:all(fun({_, V}) when is_integer(V) -> V =< 2;
+                                           (_) -> true end,
+                                        NodeData)
+                      end, Summary)),
+    ok.
 
 subscribe_should_fail_when_global_qos_true(Config) ->
     [Server | _] = Servers = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
@@ -1222,7 +1266,7 @@ add_member_not_running(Config) ->
                  declare(Ch, QQ, [{<<"x-queue-type">>, longstr, <<"quorum">>}])),
     ?assertEqual({error, node_not_running},
                  rpc:call(Server, rabbit_quorum_queue, add_member,
-                          [<<"/">>, QQ, 'rabbit@burrow'])).
+                          [<<"/">>, QQ, 'rabbit@burrow', 5000])).
 
 add_member_classic(Config) ->
     [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
@@ -1231,7 +1275,7 @@ add_member_classic(Config) ->
     ?assertEqual({'queue.declare_ok', CQ, 0, 0}, declare(Ch, CQ, [])),
     ?assertEqual({error, classic_queue_not_supported},
                  rpc:call(Server, rabbit_quorum_queue, add_member,
-                          [<<"/">>, CQ, Server])).
+                          [<<"/">>, CQ, Server, 5000])).
 
 add_member_already_a_member(Config) ->
     [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
@@ -1242,14 +1286,14 @@ add_member_already_a_member(Config) ->
     %% idempotent by design
     ?assertEqual(ok,
                  rpc:call(Server, rabbit_quorum_queue, add_member,
-                          [<<"/">>, QQ, Server])).
+                          [<<"/">>, QQ, Server, 5000])).
 
 add_member_not_found(Config) ->
     [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
     QQ = ?config(queue_name, Config),
     ?assertEqual({error, not_found},
                  rpc:call(Server, rabbit_quorum_queue, add_member,
-                          [<<"/">>, QQ, Server])).
+                          [<<"/">>, QQ, Server, 5000])).
 
 add_member(Config) ->
     [Server0, Server1] = Servers0 =
@@ -1260,12 +1304,12 @@ add_member(Config) ->
                  declare(Ch, QQ, [{<<"x-queue-type">>, longstr, <<"quorum">>}])),
     ?assertEqual({error, node_not_running},
                  rpc:call(Server0, rabbit_quorum_queue, add_member,
-                          [<<"/">>, QQ, Server1])),
+                          [<<"/">>, QQ, Server1, 5000])),
     ok = rabbit_control_helper:command(stop_app, Server1),
     ok = rabbit_control_helper:command(join_cluster, Server1, [atom_to_list(Server0)], []),
     rabbit_control_helper:command(start_app, Server1),
     ?assertEqual(ok, rpc:call(Server0, rabbit_quorum_queue, add_member,
-                              [<<"/">>, QQ, Server1])),
+                              [<<"/">>, QQ, Server1, 5000])),
     Info = rpc:call(Server0, rabbit_quorum_queue, infos,
                     [rabbit_misc:r(<<"/">>, queue, QQ)]),
     Servers = lists:sort(Servers0),
